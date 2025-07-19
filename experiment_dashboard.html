@@ -1,0 +1,73 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Tactile RL Experiments Dashboard</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .experiment { background: #f5f5f5; padding: 15px; margin: 10px; border-radius: 5px; }
+            .ppo { border-left: 4px solid #4CAF50; }
+            .sac { border-left: 4px solid #FF9800; }
+            .url { color: #2196F3; text-decoration: none; }
+            .status { font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>🚀 Tactile RL Experiments Dashboard</h1>
+        
+        <div class="experiment ppo">
+            <h2>PPO Experiment</h2>
+            <p class="status">Status: 🟢 RUNNING</p>
+            <p><strong>Run:</strong> PPO-EmbeddingRL-Vision+Touch-5D-v2</p>
+            <p><strong>Parallel Envs:</strong> 4</p>
+            <p><strong>Architecture:</strong> Transformer-based Multimodal RL</p>
+            <a href="https://wandb.ai/rl_research/tactile-insertion-experiments/runs/3b7e1iut" class="url">View PPO Run →</a>
+        </div>
+        
+        <div class="experiment sac">
+            <h2>SAC Experiment</h2>
+            <p class="status">Status: 🟡 RUNNING</p>
+            <p><strong>Run:</strong> SAC-EmbeddingRL-Vision+Touch-5D-Fixed</p>
+            <p><strong>Parallel Envs:</strong> 1</p>
+            <p><strong>Architecture:</strong> Transformer-based Multimodal RL</p>
+            <a href="https://wandb.ai/rl_research/tactile-insertion-experiments/runs/d3m7zh1t" class="url">View SAC Run →</a>
+        </div>
+        
+        <h2>🔗 Quick Links</h2>
+        <ul>
+            <li><a href="https://wandb.ai/rl_research/tactile-insertion-experiments" class="url">Main Project Dashboard</a></li>
+            <li><a href="https://wandb.ai/rl_research/tactile-insertion-experiments/reports" class="url">Compare Reports</a></li>
+            <li><a href="https://wandb.ai/rl_research/tactile-insertion-experiments/workspace" class="url">Workspace View</a></li>
+        </ul>
+        
+        <h2>🎯 Key Differences</h2>
+        <table border="1" style="border-collapse: collapse; width: 100%;">
+            <tr>
+                <th>Aspect</th>
+                <th>PPO</th>
+                <th>SAC</th>
+            </tr>
+            <tr>
+                <td>Algorithm Type</td>
+                <td>On-policy</td>
+                <td>Off-policy</td>
+            </tr>
+            <tr>
+                <td>Parallel Envs</td>
+                <td>4</td>
+                <td>1</td>
+            </tr>
+            <tr>
+                <td>Sample Efficiency</td>
+                <td>Lower</td>
+                <td>Higher</td>
+            </tr>
+            <tr>
+                <td>Stability</td>
+                <td>Higher</td>
+                <td>Lower</td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    
