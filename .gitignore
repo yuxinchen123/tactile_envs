@@ -1,0 +1,29 @@
+# Model files and checkpoints
+*.pth
+*.pt
+*.zip
+models/*.pth
+models/*.pt
+models/*.zip
+
+# Training outputs
+wandb/
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
