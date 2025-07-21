@@ -6,10 +6,28 @@ models/*.pth
 models/*.pt
 models/*.zip
 
+# Large Archive Files and Assets
+*.tar.gz
+*.rar
+*.7z
+IsaacGym_Preview_TacSL_Package/
+IsaacGym_Preview_TacSL_Package.tar.gz
+
+# Mesh Files (Large Assets)
+*_meshes/
+gelsight_r15_meshes/
+gs_mini_meshes/
+*.obj
+*.mtl
+*.stl
+*.dae
+mesh.zip
+
 # Training outputs
 wandb/
 logs/
 *.log
+*.pid
 
 # Python cache
 __pycache__/
