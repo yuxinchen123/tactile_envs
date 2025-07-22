@@ -1,12 +1,18 @@
 """
 PPO Multimodal Training Script for Tactile Environment
-- Inputs: RGB image, tactile force grid, joint angles
+- Inputs: RGB image, tactile force grid, joint angles (extracted from privileged state)
 - Encoders: CNN for image/tactile, MLP for joints
 - Fusion: Concatenate embeddings, MLP
 - Actor/Critic: Separate heads from fused embedding
 - Backend: RSL-RL PPO (PyTorch)
 """
+import os
+# Set up headless rendering for MuJoCo
+os.environ['MUJOCO_GL'] = 'egl'  # Use EGL for headless rendering
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
 import gymnasium as gym
+import tactile_envs  # This registers the tactile_envs/Insertion-v0 environment
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,8 +23,103 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import VecEnvWrapper
 import imageio
 from pathlib import Path
+
+# --- Custom Environment Wrapper ---
+class MultimodalWrapper(gym.Wrapper):
+    """
+    Wrapper that extracts joint angles from privileged state and combines with vision/tactile data.
+    Creates a multimodal observation space with image, tactile, and joints.
+    """
+    def __init__(self, env):
+        # Start with the sensory environment
+        super().__init__(env)
+        
+        # Store original state type
+        self.original_state_type = env.state_type
+        
+        # Define new observation space
+        self.observation_space = gym.spaces.Dict({
+            'image': gym.spaces.Box(low=0, high=1, shape=(64, 64, 3), dtype=np.float32),
+            'tactile': gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6, 32, 32), dtype=np.float32),
+            'joints': gym.spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32)  # Actual qpos size
+        })
+    
+    def _get_privileged_obs(self):
+        """Temporarily switch to privileged mode to get joint angles."""
+        # Store current state type
+        current_state_type = self.env.state_type
+        
+        # Switch to privileged mode
+        self.env.state_type = 'privileged'
+        
+        # Get privileged observation by directly accessing the environment's qpos
+        # Since we're in the same simulation state, we can directly read joint angles
+        joints = self.env.unwrapped.mj_data.qpos.copy()  # Extract all joint angles (19 values)
+        
+        # Restore original state type
+        self.env.state_type = current_state_type
+        
+        return joints.astype(np.float32)
+    
+    def reset(self, **kwargs):
+        # Reset with vision_and_touch mode
+        self.env.state_type = 'vision_and_touch'
+        sensory_obs, info = self.env.reset(**kwargs)
+        
+        # Get joint angles from privileged state
+        joints = self._get_privileged_obs()
+        
+        # Combine observations
+        multimodal_obs = {
+            'image': sensory_obs['image'].astype(np.float32),
+            'tactile': sensory_obs['tactile'].astype(np.float32),
+            'joints': joints
+        }
+        
+        return multimodal_obs, info
+    
+    def step(self, action):
+        # Step with vision_and_touch mode
+        self.env.state_type = 'vision_and_touch'
+        sensory_obs, reward, done, truncated, info = self.env.step(action)
+        
+        # Get joint angles from privileged state
+        joints = self._get_privileged_obs()
+        
+        # Combine observations
+        multimodal_obs = {
+            'image': sensory_obs['image'].astype(np.float32),
+            'tactile': sensory_obs['tactile'].astype(np.float32),
+            'joints': joints
+        }
+        
+        return multimodal_obs, reward, done, truncated, info
+
+class VecMultimodalWrapper(VecEnvWrapper):
+    """Vector environment wrapper for multimodal observations."""
+    def __init__(self, venv):
+        super().__init__(venv)
+        # Update observation space
+        self.observation_space = gym.spaces.Dict({
+            'image': gym.spaces.Box(low=0, high=1, shape=(64, 64, 3), dtype=np.float32),
+            'tactile': gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6, 32, 32), dtype=np.float32),
+            'joints': gym.spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32)  # Actual qpos size
+        })
+    
+    def reset(self):
+        obs = self.venv.reset()
+        return self._transform_obs(obs)
+    
+    def step_wait(self):
+        obs, rewards, dones, infos = self.venv.step_wait()
+        return self._transform_obs(obs), rewards, dones, infos
+    
+    def _transform_obs(self, obs):
+        # obs is already in multimodal format from individual wrappers
+        return obs
 
 # --- Encoder Modules ---
 class CNNEncoder(nn.Module):
@@ -70,20 +171,35 @@ class MultimodalFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space, embed_dim=256):
         super().__init__(observation_space, features_dim=embed_dim)
         img_shape = observation_space['image'].shape
-        tactile_shape = observation_space['tactile'].shape
-        joint_dim = observation_space['joints'].shape[0]
+        tactile_shape = observation_space['tactile'].shape  
+        joint_dim = observation_space['joints'].shape[0]  # Should be 37
+        
+        print(f"Initializing MultimodalFeatureExtractor:")
+        print(f"  Image shape: {img_shape}")
+        print(f"  Tactile shape: {tactile_shape}")
+        print(f"  Joint dimension: {joint_dim}")
+        
         self.img_encoder = CNNEncoder(img_shape[2], embed_dim)
-        self.tactile_encoder = CNNEncoder(tactile_shape[2], embed_dim)
+        self.tactile_encoder = CNNEncoder(tactile_shape[0], embed_dim)  # tactile has 6 channels (2 fingers × 3)
         self.joint_encoder = JointEncoder(joint_dim, embed_dim)
         self.fusion = MultimodalFusion(embed_dim, embed_dim)
+        
     def forward(self, obs):
-        img = obs['image'].float().permute(0, 3, 1, 2) / 1.0
-        tactile = obs['tactile'].float().permute(0, 3, 1, 2) / 1.0
+        # Image: (batch, height, width, channels) -> (batch, channels, height, width)
+        img = obs['image'].float().permute(0, 3, 1, 2) / 255.0  # Normalize to [0,1]
+        
+        # Tactile: (batch, channels, height, width) - already in correct format
+        tactile = obs['tactile'].float()
+        
+        # Joints: (batch, joint_dim) - 37 joint angles from qpos
         joints = obs['joints'].float()
+        # Normalize joints (optional but recommended)
         joints = (joints - joints.mean(dim=1, keepdim=True)) / (joints.std(dim=1, keepdim=True) + 1e-6)
+        
         img_emb = self.img_encoder(img)
         tactile_emb = self.tactile_encoder(tactile)
         joint_emb = self.joint_encoder(joints)
+        
         fused = self.fusion(img_emb, tactile_emb, joint_emb)
         return fused
 
@@ -147,6 +263,17 @@ class WandbVideoCallback(BaseCallback):
             print(f"Warning: Could not record video: {e}")
 
 # --- Main Training Script ---
+def make_multimodal_env(env_id, rank, seed=0):
+    """Create a single multimodal environment."""
+    def _init():
+        # Create vision+tactile environment
+        env = gym.make(env_id, state_type='vision_and_touch')
+        env.seed(seed + rank)
+        # Wrap with multimodal wrapper
+        env = MultimodalWrapper(env)
+        return env
+    return _init
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
@@ -158,7 +285,12 @@ def main():
         wandb.init(project="multimodal-ppo", entity="catresearch", name=f"job_{args.job_id}", config=vars(args))
 
     env_id = 'tactile_envs/Insertion-v0'
-    env = make_vec_env(env_id, n_envs=8, seed=args.seed)
+    
+    # Create vectorized environment with multimodal wrapper
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+    env_fns = [make_multimodal_env(env_id, i, args.seed) for i in range(8)]
+    env = SubprocVecEnv(env_fns)
+    
     policy_kwargs = dict(
         features_extractor_class=MultimodalFeatureExtractor,
         features_extractor_kwargs=dict(embed_dim=256),
