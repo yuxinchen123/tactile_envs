@@ -88,18 +88,18 @@ class MultimodalFeatureExtractor(BaseFeaturesExtractor):
         return fused
 
 class WandbVideoCallback(BaseCallback):
-    def __init__(self, video_freq=2000, verbose=0):
+    def __init__(self, video_freq=2000, verbose=0, wandb_enabled=True):
         super().__init__(verbose)
         self.video_freq = video_freq
         self.video_dir = Path("./videos")
         self.video_dir.mkdir(exist_ok=True)
         self.episode_rewards = []
         self.episode_lengths = []
+        self.wandb_enabled = wandb_enabled
     def _on_step(self) -> bool:
-        # Log episode reward/length if available
         infos = self.locals.get('infos', [])
         for info in infos:
-            if 'episode' in info:
+            if 'episode' in info and self.wandb_enabled:
                 self.episode_rewards.append(info['episode']['r'])
                 self.episode_lengths.append(info['episode']['l'])
                 wandb.log({
@@ -107,16 +107,15 @@ class WandbVideoCallback(BaseCallback):
                     'episode/length': info['episode']['l'],
                     'global_step': self.num_timesteps,
                 })
-        # Log PPO losses if available
-        if 'loss' in self.locals:
-            wandb.log({'loss': self.locals['loss'], 'global_step': self.num_timesteps})
-        if 'policy_loss' in self.locals:
-            wandb.log({'policy_loss': self.locals['policy_loss'], 'global_step': self.num_timesteps})
-        if 'value_loss' in self.locals:
-            wandb.log({'value_loss': self.locals['value_loss'], 'global_step': self.num_timesteps})
-        if 'entropy_loss' in self.locals:
-            wandb.log({'entropy_loss': self.locals['entropy_loss'], 'global_step': self.num_timesteps})
-        # Video logging
+        if self.wandb_enabled:
+            if 'loss' in self.locals:
+                wandb.log({'loss': self.locals['loss'], 'global_step': self.num_timesteps})
+            if 'policy_loss' in self.locals:
+                wandb.log({'policy_loss': self.locals['policy_loss'], 'global_step': self.num_timesteps})
+            if 'value_loss' in self.locals:
+                wandb.log({'value_loss': self.locals['value_loss'], 'global_step': self.num_timesteps})
+            if 'entropy_loss' in self.locals:
+                wandb.log({'entropy_loss': self.locals['entropy_loss'], 'global_step': self.num_timesteps})
         if self.num_timesteps % self.video_freq == 0:
             self.record_video()
         return True
@@ -140,7 +139,7 @@ class WandbVideoCallback(BaseCallback):
                     obs = env.reset()
                     if isinstance(obs, tuple):
                         obs = obs[0]
-            if frames:
+            if frames and self.wandb_enabled:
                 video_path = self.video_dir / f"policy_video_{self.num_timesteps:06d}.mp4"
                 imageio.mimsave(str(video_path), frames, fps=20)
                 wandb.log({"policy_video": wandb.Video(str(video_path), fps=20, format="mp4"), "global_step": self.num_timesteps})
@@ -152,9 +151,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--job_id', type=int, default=0)
+    parser.add_argument('--wandb', action='store_true', help='Enable WandB logging')
     args = parser.parse_args()
 
-    wandb.init(project="multimodal-ppo", entity="catresearch", name=f"job_{args.job_id}", config=vars(args))
+    if args.wandb:
+        wandb.init(project="multimodal-ppo", entity="catresearch", name=f"job_{args.job_id}", config=vars(args))
 
     env_id = 'tactile_envs/Insertion-v0'
     env = make_vec_env(env_id, n_envs=8, seed=args.seed)
@@ -165,10 +166,11 @@ def main():
         activation_fn=nn.ReLU,
     )
     model = PPO('MultiInputPolicy', env, policy_kwargs=policy_kwargs, verbose=2, batch_size=256, n_steps=2048, device='auto', seed=args.seed)
-    model.learn(total_timesteps=2_000_000, callback=WandbVideoCallback(video_freq=2000))
+    model.learn(total_timesteps=2_000_000, callback=WandbVideoCallback(video_freq=2000, wandb_enabled=args.wandb))
     model.save(f'ppo_multimodal_tactile_job{args.job_id}')
-    wandb.save(f'ppo_multimodal_tactile_job{args.job_id}.zip')
-    wandb.finish()
+    if args.wandb:
+        wandb.save(f'ppo_multimodal_tactile_job{args.job_id}.zip')
+        wandb.finish()
 
 if __name__ == '__main__':
     main()
