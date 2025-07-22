@@ -123,17 +123,22 @@ class VecMultimodalWrapper(VecEnvWrapper):
 
 # --- Encoder Modules ---
 class CNNEncoder(nn.Module):
-    def __init__(self, in_channels, embed_dim=256):
+    def __init__(self, in_channels, embed_dim=256, input_size=64):
         super().__init__()
+        # Calculate dimensions after each conv layer
+        # Conv1: 64->32 (stride=2), Conv2: 32->16 (stride=2)
+        conv1_out_size = input_size // 2  # 32 for 64x64, 16 for 32x32
+        conv2_out_size = conv1_out_size // 2  # 16 for 64x64, 8 for 32x32
+        
         self.cnn = nn.Sequential(
             nn.Conv2d(in_channels, 32, 3, stride=2, padding=1),
-            nn.LayerNorm([32, 32, 32]),
+            nn.BatchNorm2d(32),  # Use BatchNorm instead of LayerNorm for spatial data
             nn.ReLU(),
             nn.Conv2d(32, 64, 3, stride=2, padding=1),
-            nn.LayerNorm([64, 16, 16]),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 16 * 16, embed_dim),
+            nn.Linear(64 * conv2_out_size * conv2_out_size, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.ReLU(),
         )
@@ -179,8 +184,11 @@ class MultimodalFeatureExtractor(BaseFeaturesExtractor):
         print(f"  Tactile shape: {tactile_shape}")
         print(f"  Joint dimension: {joint_dim}")
         
-        self.img_encoder = CNNEncoder(img_shape[2], embed_dim)
-        self.tactile_encoder = CNNEncoder(tactile_shape[0], embed_dim)  # tactile has 6 channels (2 fingers × 3)
+        # Image encoder: 64x64x3 -> embedding
+        self.img_encoder = CNNEncoder(img_shape[2], embed_dim, input_size=img_shape[0])
+        # Tactile encoder: 6x32x32 -> embedding  
+        self.tactile_encoder = CNNEncoder(tactile_shape[0], embed_dim, input_size=tactile_shape[1])
+        # Joint encoder: joint_dim -> embedding
         self.joint_encoder = JointEncoder(joint_dim, embed_dim)
         self.fusion = MultimodalFusion(embed_dim, embed_dim)
         
