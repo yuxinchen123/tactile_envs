@@ -49,24 +49,24 @@ class MultimodalWrapper(gym.Wrapper):
     
     def _get_privileged_obs(self):
         """Temporarily switch to privileged mode to get joint angles."""
-        # Store current state type
-        current_state_type = self.env.state_type
+        # Store current state type using proper wrapper access
+        current_state_type = self.env.unwrapped.state_type
         
         # Switch to privileged mode
-        self.env.state_type = 'privileged'
+        self.env.unwrapped.state_type = 'privileged'
         
         # Get privileged observation by directly accessing the environment's qpos
         # Since we're in the same simulation state, we can directly read joint angles
         joints = self.env.unwrapped.mj_data.qpos.copy()  # Extract all joint angles (19 values)
         
         # Restore original state type
-        self.env.state_type = current_state_type
+        self.env.unwrapped.state_type = current_state_type
         
         return joints.astype(np.float32)
     
     def reset(self, **kwargs):
         # Reset with vision_and_touch mode
-        self.env.state_type = 'vision_and_touch'
+        self.env.unwrapped.state_type = 'vision_and_touch'
         sensory_obs, info = self.env.reset(**kwargs)
         
         # Get joint angles from privileged state
@@ -83,7 +83,7 @@ class MultimodalWrapper(gym.Wrapper):
     
     def step(self, action):
         # Step with vision_and_touch mode
-        self.env.state_type = 'vision_and_touch'
+        self.env.unwrapped.state_type = 'vision_and_touch'
         sensory_obs, reward, done, truncated, info = self.env.step(action)
         
         # Get joint angles from privileged state
@@ -220,7 +220,10 @@ class WandbVideoCallback(BaseCallback):
         self.episode_rewards = []
         self.episode_lengths = []
         self.wandb_enabled = wandb_enabled
+        self.step_count = 0
+        
     def _on_step(self) -> bool:
+        # Log episode metrics
         infos = self.locals.get('infos', [])
         for info in infos:
             if 'episode' in info and self.wandb_enabled:
@@ -229,23 +232,77 @@ class WandbVideoCallback(BaseCallback):
                 wandb.log({
                     'episode/reward': info['episode']['r'],
                     'episode/length': info['episode']['l'],
+                    'episode/reward_mean': np.mean(self.episode_rewards[-100:]),  # Rolling mean
                     'global_step': self.num_timesteps,
                 })
-        if self.wandb_enabled:
-            if 'loss' in self.locals:
-                wandb.log({'loss': self.locals['loss'], 'global_step': self.num_timesteps})
-            if 'policy_loss' in self.locals:
-                wandb.log({'policy_loss': self.locals['policy_loss'], 'global_step': self.num_timesteps})
-            if 'value_loss' in self.locals:
-                wandb.log({'value_loss': self.locals['value_loss'], 'global_step': self.num_timesteps})
-            if 'entropy_loss' in self.locals:
-                wandb.log({'entropy_loss': self.locals['entropy_loss'], 'global_step': self.num_timesteps})
+        
+        # Record video periodically
         if self.num_timesteps % self.video_freq == 0:
             self.record_video()
         return True
+    
+    def _on_rollout_end(self) -> None:
+        """Log training metrics at the end of each rollout."""
+        if not self.wandb_enabled:
+            return
+            
+        # Get training statistics from the model
+        if hasattr(self.model, 'logger') and hasattr(self.model.logger, 'name_to_value'):
+            logger_dict = self.model.logger.name_to_value
+            
+            # Log comprehensive training metrics
+            metrics_to_log = {}
+            
+            # Policy metrics
+            if 'train/policy_gradient_loss' in logger_dict:
+                metrics_to_log['train/policy_loss'] = logger_dict['train/policy_gradient_loss']
+            if 'train/value_loss' in logger_dict:
+                metrics_to_log['train/value_loss'] = logger_dict['train/value_loss']
+            if 'train/entropy_loss' in logger_dict:
+                metrics_to_log['train/entropy_loss'] = logger_dict['train/entropy_loss']
+            if 'train/loss' in logger_dict:
+                metrics_to_log['train/total_loss'] = logger_dict['train/loss']
+                
+            # Learning rate and other hyperparameters
+            if 'train/learning_rate' in logger_dict:
+                metrics_to_log['train/learning_rate'] = logger_dict['train/learning_rate']
+            if 'train/clip_fraction' in logger_dict:
+                metrics_to_log['train/clip_fraction'] = logger_dict['train/clip_fraction']
+            if 'train/explained_variance' in logger_dict:
+                metrics_to_log['train/explained_variance'] = logger_dict['train/explained_variance']
+                
+            # Rollout metrics
+            if 'rollout/ep_rew_mean' in logger_dict:
+                metrics_to_log['rollout/episode_reward_mean'] = logger_dict['rollout/ep_rew_mean']
+            if 'rollout/ep_len_mean' in logger_dict:
+                metrics_to_log['rollout/episode_length_mean'] = logger_dict['rollout/ep_len_mean']
+                
+            # Time metrics
+            if 'time/fps' in logger_dict:
+                metrics_to_log['time/fps'] = logger_dict['time/fps']
+            if 'time/total_timesteps' in logger_dict:
+                metrics_to_log['time/total_timesteps'] = logger_dict['time/total_timesteps']
+                
+            # Add timestep for x-axis
+            metrics_to_log['global_step'] = self.num_timesteps
+            
+            if metrics_to_log:
+                wandb.log(metrics_to_log)
     def record_video(self):
         try:
-            env = self.training_env.envs[0]
+            # Handle different types of vectorized environments
+            if hasattr(self.training_env, 'envs'):
+                # DummyVecEnv has envs attribute
+                env = self.training_env.envs[0]
+            elif hasattr(self.training_env, 'get_attr'):
+                # SubprocVecEnv doesn't have envs, create a temporary env for video
+                from gymnasium import make
+                env = make('tactile_envs/Insertion-v0', state_type='vision_and_touch')
+                env = MultimodalWrapper(env)
+            else:
+                print("Warning: Cannot access environment for video recording")
+                return
+                
             frames = []
             obs = env.reset()
             if isinstance(obs, tuple):
@@ -263,6 +320,11 @@ class WandbVideoCallback(BaseCallback):
                     obs = env.reset()
                     if isinstance(obs, tuple):
                         obs = obs[0]
+            
+            # Close temporary environment if we created one
+            if not hasattr(self.training_env, 'envs'):
+                env.close()
+                
             if frames and self.wandb_enabled:
                 video_path = self.video_dir / f"policy_video_{self.num_timesteps:06d}.mp4"
                 imageio.mimsave(str(video_path), frames, fps=20)
@@ -271,12 +333,16 @@ class WandbVideoCallback(BaseCallback):
             print(f"Warning: Could not record video: {e}")
 
 # --- Main Training Script ---
-def make_multimodal_env(env_id, rank, seed=0):
-    """Create a single multimodal environment."""
+def make_multimodal_env(env_id, rank, seed=0, gpu_id=0):
+    """Create a single multimodal environment with GPU assignment."""
     def _init():
+        # Set CUDA device for this environment worker
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        
         # Create vision+tactile environment
         env = gym.make(env_id, state_type='vision_and_touch')
-        env.seed(seed + rank)
+        # Use proper seeding (no longer env.seed())
+        env.reset(seed=seed + rank)
         # Wrap with multimodal wrapper
         env = MultimodalWrapper(env)
         return env
@@ -287,30 +353,109 @@ def main():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--job_id', type=int, default=0)
     parser.add_argument('--wandb', action='store_true', help='Enable WandB logging')
+    parser.add_argument('--gpu_id', type=int, default=0, help='GPU ID to use for this job')
+    parser.add_argument('--single_env', action='store_true', help='Run single environment on specified GPU')
     args = parser.parse_args()
 
+    # Set primary GPU for this job
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
+    
     if args.wandb:
-        wandb.init(project="multimodal-ppo", entity="catresearch", name=f"job_{args.job_id}", config=vars(args))
+        # Create unique run name and tags for each GPU
+        run_name = f"gpu{args.gpu_id}_seed{args.seed}_job{args.job_id}"
+        wandb.init(
+            project="multimodal-ppo-8gpu", 
+            entity="catresearch", 
+            name=run_name,
+            config={
+                **vars(args),
+                'architecture': 'multimodal_cnn_mlp_fusion',
+                'environment': 'tactile_envs/Insertion-v0',
+                'policy': 'PPO',
+                'total_timesteps': 2_000_000,
+                'embed_dim': 256,
+                'net_arch': {'pi': [256, 256], 'vf': [256, 256]}
+            },
+            tags=[f"gpu_{args.gpu_id}", f"seed_{args.seed}", "multimodal", "tactile", "insertion"],
+            group=f"8gpu_experiment_seed{args.seed}"
+        )
 
     env_id = 'tactile_envs/Insertion-v0'
     
-    # Create vectorized environment with multimodal wrapper
-    from stable_baselines3.common.vec_env import SubprocVecEnv
-    env_fns = [make_multimodal_env(env_id, i, args.seed) for i in range(8)]
-    env = SubprocVecEnv(env_fns)
+    if args.single_env:
+        # Single environment mode: one env per GPU with unique seed and state
+        from stable_baselines3.common.vec_env import DummyVecEnv
+        
+        # Create environment factory with unique seed per GPU
+        def make_unique_env():
+            def _init():
+                # Set unique random seeds for this GPU
+                torch.manual_seed(args.seed + args.gpu_id * 1000)
+                np.random.seed(args.seed + args.gpu_id * 1000)
+                
+                # Create environment with unique seeding
+                env = gym.make(env_id, state_type='vision_and_touch')
+                env.reset(seed=args.seed + args.gpu_id * 1000)
+                env = MultimodalWrapper(env)
+                return env
+            return _init
+        
+        env = DummyVecEnv([make_unique_env()])
+        batch_size = 64   # Smaller batch for single env
+        n_steps = 1024    # Moderate steps per rollout
+        print(f"🔧 GPU {args.gpu_id}: Running SINGLE environment with seed {args.seed + args.gpu_id * 1000}")
+    else:
+        # Multi-environment mode: multiple envs on specified GPU
+        from stable_baselines3.common.vec_env import SubprocVecEnv
+        env_fns = [make_multimodal_env(env_id, i, args.seed + args.gpu_id * 1000, args.gpu_id) for i in range(4)]
+        env = SubprocVecEnv(env_fns)
+        batch_size = 256
+        n_steps = 2048
+        print(f"🔧 GPU {args.gpu_id}: Running MULTIPLE environments with base seed {args.seed + args.gpu_id * 1000}")
     
     policy_kwargs = dict(
         features_extractor_class=MultimodalFeatureExtractor,
         features_extractor_kwargs=dict(embed_dim=256),
-        net_arch=[dict(pi=[256, 256], vf=[256, 256])],
+        net_arch=dict(pi=[256, 256], vf=[256, 256]),
         activation_fn=nn.ReLU,
     )
-    model = PPO('MultiInputPolicy', env, policy_kwargs=policy_kwargs, verbose=2, batch_size=256, n_steps=2048, device='auto', seed=args.seed)
-    model.learn(total_timesteps=2_000_000, callback=WandbVideoCallback(video_freq=2000, wandb_enabled=args.wandb))
-    model.save(f'ppo_multimodal_tactile_job{args.job_id}')
+    
+    # Use the specified GPU
+    device = f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu'
+    print(f"🎯 GPU {args.gpu_id}: Using device {device}")
+    
+    model = PPO(
+        'MultiInputPolicy', 
+        env, 
+        policy_kwargs=policy_kwargs, 
+        verbose=2, 
+        batch_size=batch_size, 
+        n_steps=n_steps, 
+        device=device, 
+        seed=args.seed + args.gpu_id * 1000,  # Unique seed per GPU
+        learning_rate=3e-4,
+        clip_range=0.2,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        max_grad_norm=0.5
+    )
+    
+    print(f"🚀 GPU {args.gpu_id}: Starting training for 2M timesteps...")
+    model.learn(
+        total_timesteps=2_000_000, 
+        callback=WandbVideoCallback(video_freq=2000, wandb_enabled=args.wandb),
+        progress_bar=True
+    )
+    
+    # Save model with unique name
+    model_path = f'ppo_multimodal_tactile_gpu{args.gpu_id}_seed{args.seed}'
+    model.save(model_path)
+    print(f"💾 GPU {args.gpu_id}: Model saved as {model_path}")
+    
     if args.wandb:
-        wandb.save(f'ppo_multimodal_tactile_job{args.job_id}.zip')
+        wandb.save(f'{model_path}.zip')
         wandb.finish()
+        print(f"☁️ GPU {args.gpu_id}: WandB run completed")
 
 if __name__ == '__main__':
     main()
