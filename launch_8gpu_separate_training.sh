@@ -5,7 +5,8 @@
 # Each process logs separately to WandB
 
 echo "🚀 Starting 8-GPU multimodal PPO training..."
-echo "📊 Each GPU will run one environment with separate WandB logging"
+echo "📊 Each GPU will run 4 environments with separate WandB logging"
+echo "🎯 Total: 32 parallel environments across 8 GPUs"
 
 # Set common parameters
 SEED=42
@@ -26,7 +27,6 @@ for gpu_id in {0..7}; do
     # Start training process in background
     nohup python ppo_multimodal_training.py \
         --wandb \
-        --single_env \
         --gpu_id ${gpu_id} \
         --job_id ${gpu_id} \
         --seed $((SEED + gpu_id)) \

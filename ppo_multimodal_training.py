@@ -405,13 +405,19 @@ def main():
         n_steps = 1024    # Moderate steps per rollout
         print(f"🔧 GPU {args.gpu_id}: Running SINGLE environment with seed {args.seed + args.gpu_id * 1000}")
     else:
-        # Multi-environment mode: multiple envs on specified GPU
+        # Multi-environment mode: 4 diverse envs per GPU for better utilization
         from stable_baselines3.common.vec_env import SubprocVecEnv
-        env_fns = [make_multimodal_env(env_id, i, args.seed + args.gpu_id * 1000, args.gpu_id) for i in range(4)]
+        num_envs_per_gpu = 4
+        # Create diverse seeds: base_seed + gpu_offset + env_offset
+        env_fns = []
+        for i in range(num_envs_per_gpu):
+            env_seed = args.seed + args.gpu_id * 1000 + i * 100  # Each env gets unique seed
+            env_fns.append(make_multimodal_env(env_id, i, env_seed, args.gpu_id))
+        
         env = SubprocVecEnv(env_fns)
-        batch_size = 256
-        n_steps = 2048
-        print(f"🔧 GPU {args.gpu_id}: Running MULTIPLE environments with base seed {args.seed + args.gpu_id * 1000}")
+        batch_size = 256  # Larger batch for multiple envs
+        n_steps = 2048    # More steps per rollout
+        print(f"🔧 GPU {args.gpu_id}: Running {num_envs_per_gpu} environments with seeds {args.seed + args.gpu_id * 1000} to {args.seed + args.gpu_id * 1000 + (num_envs_per_gpu-1) * 100}")
     
     policy_kwargs = dict(
         features_extractor_class=MultimodalFeatureExtractor,
